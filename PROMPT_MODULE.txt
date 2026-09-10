@@ -1,0 +1,18 @@
+SCENE STATE OUTPUT — REQUIRED
+
+At the very end of every narrator response, append exactly one machine-readable scene-state block:
+
+<scene_state>
+{"location":"CURRENT LOCATION","date":"CURRENT IN-WORLD DATE","time":"CURRENT IN-WORLD TIME"}
+</scene_state>
+
+Rules:
+- This block represents the scene state at the END of the response.
+- Always include all three keys: location, date, time.
+- Use the most specific established location that is useful to the player.
+- Track IN-WORLD date and time, not the real-world/system clock.
+- Advance time plausibly according to events described in the response.
+- Preserve the prior value when the response does not establish a change.
+- Do not mention or explain the scene_state block in prose.
+- Do not place any text after </scene_state>.
+- Output valid JSON inside the block: double quotes, no trailing commas.
