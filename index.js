@@ -69,6 +69,28 @@ function stripSceneState(raw) {
     return String(raw ?? '').replace(TAG_RE, '').trimEnd();
 }
 
+// Finds a trailing visible JSON object even if TauriTavern has already stripped
+// the <scene_state> wrapper before the extension sees the rendered message.
+function parseTrailingVisibleState(text) {
+    const src = String(text ?? '').trimEnd();
+    const start = src.lastIndexOf('{');
+    if (start < 0) return null;
+
+    const candidate = src.slice(start).trim();
+    if (!candidate.endsWith('}')) return null;
+    if (!/"location"\s*:/.test(candidate) || !/"date"\s*:/.test(candidate) || !/"time"\s*:/.test(candidate)) {
+        return null;
+    }
+
+    try {
+        const state = normalizeState(JSON.parse(candidate));
+        if (!state) return null;
+        return { state, startIndex: start, candidate };
+    } catch {
+        return null;
+    }
+}
+
 async function loadStoredState() {
     const handle = getHandle();
     if (!handle?.store?.getJson || !handle?.store?.listKeys) return null;
@@ -137,7 +159,7 @@ function getRawMessage(mes) {
 
 function formatCleanMessage(mes, cleanRaw) {
     const textEl = mes.querySelector('.mes_text');
-    if (!textEl) return;
+    if (!textEl) return false;
 
     const record = getMessageRecord(mes);
     const formatter = window.SillyTavern?.messageFormatting;
@@ -150,21 +172,54 @@ function formatCleanMessage(mes, cleanRaw) {
             Boolean(msg.is_user),
             mesId,
         );
-        return;
+        return true;
     }
-
-    // Fallback for hosts where messageFormatting is unavailable.
-    textEl.textContent = cleanRaw;
+    return false;
 }
 
-function scrubRenderedLeak(textEl) {
-    // Safety net: if the renderer has already stripped the XML tags but left
-    // the JSON body visible, remove a trailing scene-state JSON object.
-    const html = textEl.innerHTML;
-    const leakedJson = /(?:<p>)?\s*\{\s*&quot;location&quot;[\s\S]*?&quot;time&quot;\s*:\s*&quot;[^&]*&quot;\s*\}\s*(?:<\/p>)?\s*$/i;
-    if (leakedJson.test(html)) {
-        textEl.innerHTML = html.replace(leakedJson, '').trim();
+// Remove everything from a character offset in an element's visible text to
+// the end while preserving the HTML/Markdown formatting before that point.
+function deleteTextFromOffset(root, startOffset) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    let total = 0;
+    let startNode = null;
+    let startNodeOffset = 0;
+
+    while (walker.nextNode()) {
+        const node = walker.currentNode;
+        const len = node.nodeValue?.length ?? 0;
+        nodes.push(node);
+        if (!startNode && startOffset <= total + len) {
+            startNode = node;
+            startNodeOffset = Math.max(0, startOffset - total);
+        }
+        total += len;
     }
+
+    if (!startNode) return false;
+
+    const range = document.createRange();
+    range.setStart(startNode, Math.min(startNodeOffset, startNode.nodeValue.length));
+    range.setEnd(root, root.childNodes.length);
+    range.deleteContents();
+
+    // Remove empty trailing wrappers left behind after deleting the JSON.
+    let child = root.lastElementChild;
+    while (child && !child.textContent.trim() && !child.querySelector('img,video,audio,iframe')) {
+        const prev = child.previousElementSibling;
+        child.remove();
+        child = prev;
+    }
+    return true;
+}
+
+function removeVisibleTrailingState(textEl, visible) {
+    if (!visible) return false;
+    const full = textEl.textContent || '';
+    const suffixStart = full.lastIndexOf(visible.candidate);
+    if (suffixStart < 0) return false;
+    return deleteTextFromOffset(textEl, suffixStart);
 }
 
 function isAssistantMessage(mes) {
@@ -182,16 +237,25 @@ function renderOneMessage(mes, inheritedState = null) {
     if (!textEl) return inheritedState;
 
     const raw = getRawMessage(mes);
-    const found = parseSceneState(raw);
+    const rawState = parseSceneState(raw);
+    const visibleState = parseTrailingVisibleState(textEl.textContent || '');
+    const found = rawState || visibleState?.state || null;
     const state = found || inheritedState || currentState;
 
-    if (found) {
+    if (rawState) {
+        // Prefer a clean re-render from raw text when the host formatter is exposed.
         const cleanRaw = stripSceneState(raw);
-        formatCleanMessage(mes, cleanRaw);
-        persistStateSoon(found);
-    } else {
-        scrubRenderedLeak(textEl);
+        const formatted = formatCleanMessage(mes, cleanRaw);
+        if (!formatted) {
+            // If formatter is unavailable, remove any JSON that leaked into rendered text.
+            removeVisibleTrailingState(textEl, visibleState);
+        }
+    } else if (visibleState) {
+        // Android/current TauriTavern may strip the XML wrapper before DOM rendering.
+        removeVisibleTrailingState(textEl, visibleState);
     }
+
+    if (found) persistStateSoon(found);
 
     const old = mes.querySelector('.tt-scene-header');
     if (old) old.remove();
