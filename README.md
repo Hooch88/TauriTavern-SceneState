@@ -1,16 +1,11 @@
 # TauriTavern Scene State
 
-Version 0.2.0
+Version 0.3.0
 
-A lightweight TauriTavern extension that adds two narrator-facing display features:
+A lightweight TauriTavern extension with two narrator-facing display features:
 
 1. **Scene header** — shows the current in-world location, date, and time above narrator responses.
-2. **Speaker colors** — gives each NPC a stable dialogue color based on the speaker name, while leaving narration in the normal theme color.
-
-Example scene header:
-
-    📍 Sigma Tau House — Eugene, Oregon
-    🕒 Friday, September 11, 2026 — 11:42 PM
+2. **Speaker colors** — gives each NPC a stable dialogue color derived from the speaker name, while leaving narration in the normal theme color.
 
 ## Install
 
@@ -18,63 +13,54 @@ In TauriTavern, use the third-party extension installer and paste:
 
     https://github.com/Hooch88/TauriTavern-SceneState
 
-Reload TauriTavern after installation or update if needed.
+Update/reload TauriTavern after a new release.
 
-## Scene State preset module
+## 07 — Scene State
 
-Add the contents of `PROMPT_MODULE.txt` as a separate **System** prompt in your preset.
+Add the contents of `PROMPT_MODULE.txt` as a **System** prompt near the end of your preset.
 
-Recommended name:
+The narrator now emits renderer-safe plain-text markers:
 
-    07 — Scene State
+    [[scene_state]]
+    {"location":"Sigma Tau House — Eugene, Oregon","date":"September 11, 2026","time":"11:42 PM"}
+    [[/scene_state]]
 
-Recommended placement:
+The extension removes that metadata from display and renders the scene header at the top of the narrator message.
 
-    Late in the prompt, after Chat History / near final generation instructions.
+Version 0.3.0 still recognizes the older `<scene_state>...</scene_state>` form and bare trailing state JSON for backward compatibility.
 
-The narrator appends:
+## 08 — Speaker Colors
 
-    <scene_state>
-    {"location":"Sigma Tau House — Eugene, Oregon","date":"Friday, September 11, 2026","time":"11:42 PM"}
-    </scene_state>
+Add the contents of `SPEAKER_MODULE.txt` as another **System** prompt near the Scene State module.
 
-The extension consumes that state and renders the clean header above narrator messages.
-
-## Speaker Colors preset module
-
-Add the contents of `SPEAKER_MODULE.txt` as another **System** prompt.
-
-Recommended name:
-
-    08 — Speaker Colors
-
-Recommended placement:
-
-    Immediately before or after the Scene State module, late in the prompt.
-
-The narrator emits internal markers such as:
+The narrator emits:
 
     [[speaker:Ms. Adair]]
     "Grant, I need you to be very precise with me."
     [[/speaker]]
 
-The extension removes the markers from display and colors only the dialogue. The same exact speaker name always maps to the same color within and across messages.
+The extension removes the markers and colors only the enclosed dialogue. The same exact speaker name maps deterministically to the same color.
 
-Narration remains in the normal TauriTavern theme color.
+## TauriTavern integration
+
+Version 0.3.0 uses TauriTavern's `chatSurface` participant API when managed message ownership is enabled. This is the supported place to modify detached `.mes_text` content before TauriTavern commits it to the live chat surface. On older/static hosts it falls back to normal SillyTavern message-render events.
+
+This avoids relying on a long-running DOM MutationObserver that can be overwritten by TauriTavern's windowed/managed chat rendering.
 
 ## Design
 
 - no external API or second model call
 - no lorebook dependency
-- per-chat scene-state persistence
+- no separate Regex extension required
+- renderer-safe scene markers
 - deterministic speaker colors derived from speaker names
-- no visible speaker labels required
-- speaker tagging and scene-state tracking are independent prompt modules
+- narration remains in the normal theme color
+- Scene State and Speaker Colors remain separate preset modules
 
 ## Files
 
 - `manifest.json` — extension metadata
-- `index.js` — scene extraction, persistence, speaker parsing, and rendering
-- `style.css` — header and speaker styling
+- `index.js` — ChatSurface integration and rendering
+- `style.css` — scene header and speaker styling
 - `PROMPT_MODULE.txt` — scene-state narrator instruction
 - `SPEAKER_MODULE.txt` — speaker-tagging narrator instruction
