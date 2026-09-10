@@ -5,6 +5,7 @@ const TAG_RE = /<scene_state>\s*([\s\S]*?)\s*<\/scene_state>/i;
 let currentState = null;
 let observer = null;
 let saveTimer = null;
+let rendering = false;
 
 function log(...args) {
     console.debug('[Scene State]', ...args);
@@ -30,6 +31,14 @@ function getHandle() {
     }
 }
 
+function getContext() {
+    try {
+        return window.SillyTavern?.getContext?.() ?? null;
+    } catch {
+        return null;
+    }
+}
+
 function normalizeState(obj) {
     if (!obj || typeof obj !== 'object') return null;
     const location = String(obj.location ?? '').trim();
@@ -44,7 +53,6 @@ function parseSceneState(raw) {
     if (!match) return null;
 
     const body = match[1].trim();
-
     try {
         return normalizeState(JSON.parse(body));
     } catch {}
@@ -57,6 +65,10 @@ function parseSceneState(raw) {
     return normalizeState(obj);
 }
 
+function stripSceneState(raw) {
+    return String(raw ?? '').replace(TAG_RE, '').trimEnd();
+}
+
 async function loadStoredState() {
     const handle = getHandle();
     if (!handle?.store?.getJson || !handle?.store?.listKeys) return null;
@@ -64,15 +76,9 @@ async function loadStoredState() {
     try {
         const keys = await handle.store.listKeys({ namespace: EXT_NAME });
         const keyList = Array.isArray(keys) ? keys : (Array.isArray(keys?.keys) ? keys.keys : []);
+        if (!keyList.includes(STATE_KEY)) return null;
 
-        if (!keyList.includes(STATE_KEY)) {
-            return null;
-        }
-
-        const value = await handle.store.getJson({
-            namespace: EXT_NAME,
-            key: STATE_KEY,
-        });
+        const value = await handle.store.getJson({ namespace: EXT_NAME, key: STATE_KEY });
         return normalizeState(value);
     } catch (err) {
         console.warn('[Scene State] Failed to read stored scene state:', err);
@@ -89,11 +95,7 @@ function persistStateSoon(state) {
         const handle = getHandle();
         if (!handle?.store?.setJson) return;
         try {
-            await handle.store.setJson({
-                namespace: EXT_NAME,
-                key: STATE_KEY,
-                value: currentState,
-            });
+            await handle.store.setJson({ namespace: EXT_NAME, key: STATE_KEY, value: currentState });
         } catch (err) {
             console.warn('[Scene State] Failed to persist scene state:', err);
         }
@@ -118,20 +120,51 @@ function buildHeader(state) {
     return header;
 }
 
-function stripStateTagFromElement(textEl) {
-    const explicitTags = textEl.querySelectorAll?.('scene_state');
-    explicitTags?.forEach(el => el.remove());
-
-    const html = textEl.innerHTML;
-    if (TAG_RE.test(html)) {
-        textEl.innerHTML = html.replace(TAG_RE, '').trim();
-    }
+function getMessageRecord(mes) {
+    const mesId = Number(mes.getAttribute('mesid'));
+    if (!Number.isInteger(mesId) || mesId < 0) return null;
+    const ctx = getContext();
+    const msg = ctx?.chat?.[mesId] ?? null;
+    return msg ? { msg, mesId, ctx } : null;
 }
 
-function extractRawFromMessage(mes) {
+function getRawMessage(mes) {
+    const record = getMessageRecord(mes);
+    if (record?.msg?.mes != null) return String(record.msg.mes);
     const textEl = mes.querySelector('.mes_text');
-    if (!textEl) return '';
-    return textEl.innerText || textEl.textContent || '';
+    return textEl?.innerText || textEl?.textContent || '';
+}
+
+function formatCleanMessage(mes, cleanRaw) {
+    const textEl = mes.querySelector('.mes_text');
+    if (!textEl) return;
+
+    const record = getMessageRecord(mes);
+    const formatter = window.SillyTavern?.messageFormatting;
+    if (record && typeof formatter === 'function') {
+        const { msg, mesId } = record;
+        textEl.innerHTML = formatter(
+            cleanRaw,
+            msg.name,
+            Boolean(msg.is_system),
+            Boolean(msg.is_user),
+            mesId,
+        );
+        return;
+    }
+
+    // Fallback for hosts where messageFormatting is unavailable.
+    textEl.textContent = cleanRaw;
+}
+
+function scrubRenderedLeak(textEl) {
+    // Safety net: if the renderer has already stripped the XML tags but left
+    // the JSON body visible, remove a trailing scene-state JSON object.
+    const html = textEl.innerHTML;
+    const leakedJson = /(?:<p>)?\s*\{\s*&quot;location&quot;[\s\S]*?&quot;time&quot;\s*:\s*&quot;[^&]*&quot;\s*\}\s*(?:<\/p>)?\s*$/i;
+    if (leakedJson.test(html)) {
+        textEl.innerHTML = html.replace(leakedJson, '').trim();
+    }
 }
 
 function isAssistantMessage(mes) {
@@ -148,11 +181,17 @@ function renderOneMessage(mes, inheritedState = null) {
     const textEl = mes.querySelector('.mes_text');
     if (!textEl) return inheritedState;
 
-    const raw = extractRawFromMessage(mes);
-    const found = parseSceneState(raw) || parseSceneState(textEl.innerHTML);
+    const raw = getRawMessage(mes);
+    const found = parseSceneState(raw);
     const state = found || inheritedState || currentState;
 
-    stripStateTagFromElement(textEl);
+    if (found) {
+        const cleanRaw = stripSceneState(raw);
+        formatCleanMessage(mes, cleanRaw);
+        persistStateSoon(found);
+    } else {
+        scrubRenderedLeak(textEl);
+    }
 
     const old = mes.querySelector('.tt-scene-header');
     if (old) old.remove();
@@ -160,28 +199,25 @@ function renderOneMessage(mes, inheritedState = null) {
     if (state) {
         const header = buildHeader(state);
         const insertionPoint = mes.querySelector('.mes_block') || textEl.parentElement || mes;
-        if (insertionPoint === mes) {
-            mes.prepend(header);
-        } else {
-            insertionPoint.insertBefore(header, textEl);
-        }
+        if (insertionPoint === mes) mes.prepend(header);
+        else insertionPoint.insertBefore(header, textEl);
     }
 
-    if (found) {
-        persistStateSoon(found);
-        return found;
-    }
-    return state;
+    return found || state;
 }
 
 function renderAll() {
+    if (rendering) return;
     const chat = document.querySelector('#chat');
     if (!chat) return;
 
-    let state = currentState;
-    const messages = [...chat.querySelectorAll('.mes')];
-    for (const mes of messages) {
-        state = renderOneMessage(mes, state);
+    rendering = true;
+    try {
+        let state = currentState;
+        const messages = [...chat.querySelectorAll('.mes')];
+        for (const mes of messages) state = renderOneMessage(mes, state);
+    } finally {
+        rendering = false;
     }
 }
 
@@ -194,13 +230,9 @@ function observeChat() {
 
     observer?.disconnect();
     observer = new MutationObserver(() => {
-        requestAnimationFrame(renderAll);
+        if (!rendering) requestAnimationFrame(renderAll);
     });
-    observer.observe(chat, {
-        childList: true,
-        subtree: true,
-        characterData: true,
-    });
+    observer.observe(chat, { childList: true, subtree: true, characterData: true });
 }
 
 async function refreshForCurrentChat() {
@@ -216,7 +248,7 @@ async function init() {
     renderAll();
 
     try {
-        const ctx = window.SillyTavern?.getContext?.();
+        const ctx = getContext();
         const eventSource = ctx?.eventSource;
         const eventTypes = ctx?.eventTypes;
 
@@ -233,6 +265,7 @@ async function init() {
                 eventTypes.MESSAGE_EDITED,
                 eventTypes.MESSAGE_DELETED,
                 eventTypes.CHARACTER_MESSAGE_RENDERED,
+                eventTypes.GENERATION_ENDED,
             ].filter(Boolean);
 
             rerenderEvents.forEach(evt => {
