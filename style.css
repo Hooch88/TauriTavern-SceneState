@@ -1,0 +1,24 @@
+.tt-scene-header {
+    box-sizing: border-box;
+    margin: 0 0 0.75rem 0;
+    padding: 0.55rem 0.75rem;
+    border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+    border-radius: 0.55rem;
+    background: color-mix(in srgb, currentColor 5%, transparent);
+    font-size: 0.9em;
+    line-height: 1.35;
+    opacity: 0.92;
+}
+
+.tt-scene-header-location {
+    font-weight: 600;
+}
+
+.tt-scene-header-time {
+    margin-top: 0.15rem;
+    opacity: 0.8;
+}
+
+scene_state {
+    display: none !important;
+}
