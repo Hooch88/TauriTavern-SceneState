@@ -1,0 +1,19 @@
+SPEAKER TAGGING — REQUIRED
+
+Whenever an NPC speaks dialogue, wrap only that spoken dialogue in speaker markers:
+
+[[speaker:EXACT CHARACTER NAME]]
+"Spoken dialogue here."
+[[/speaker]]
+
+Rules:
+- Use the speaker's established name exactly and consistently across responses.
+- Tag spoken dialogue only. Do not tag narration, internal thoughts, descriptions, sound effects, quoted documents, text-message contents, or the user's protagonist.
+- Do not include narration inside a speaker block.
+- If the same NPC speaks multiple consecutive dialogue paragraphs with no narration between them, one speaker block may contain all of those dialogue paragraphs.
+- If narration interrupts the speech, close the speaker block before the narration and open a new block if that NPC speaks again.
+- Never invent a speaker merely to satisfy this format.
+- Do not explain, mention, or comment on the speaker markers.
+- Preserve normal quotation marks and prose formatting inside the markers.
+
+The markers are machine-readable display metadata. The Scene State extension removes them from the visible response and assigns each NPC a stable dialogue color based on the speaker name.
