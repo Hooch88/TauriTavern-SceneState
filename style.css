@@ -19,6 +19,10 @@
     opacity: 0.8;
 }
 
+.tt-speaker-dialogue {
+    transition: color 120ms ease;
+}
+
 scene_state {
     display: none !important;
 }
