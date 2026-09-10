@@ -1,6 +1,7 @@
 const EXT_NAME = 'tt-scene-state';
 const STATE_KEY = 'current';
 const TAG_RE = /<scene_state>\s*([\s\S]*?)\s*<\/scene_state>/i;
+const SPEAKER_BLOCK_RE = /\[\[speaker:([^\]\r\n]+)\]\]([\s\S]*?)\[\[\/speaker\]\]/gi;
 
 let currentState = null;
 let observer = null;
@@ -69,8 +70,6 @@ function stripSceneState(raw) {
     return String(raw ?? '').replace(TAG_RE, '').trimEnd();
 }
 
-// Finds a trailing visible JSON object even if TauriTavern has already stripped
-// the <scene_state> wrapper before the extension sees the rendered message.
 function parseTrailingVisibleState(text) {
     const src = String(text ?? '').trimEnd();
     const start = src.lastIndexOf('{');
@@ -89,6 +88,17 @@ function parseTrailingVisibleState(text) {
     } catch {
         return null;
     }
+}
+
+function parseSpeakerBlocks(raw) {
+    const blocks = [];
+    const clean = String(raw ?? '').replace(SPEAKER_BLOCK_RE, (_full, name, body) => {
+        const speaker = String(name ?? '').trim();
+        const dialogue = String(body ?? '');
+        if (speaker && dialogue.trim()) blocks.push({ speaker, dialogue });
+        return dialogue;
+    });
+    return { clean, blocks };
 }
 
 async function loadStoredState() {
@@ -177,11 +187,8 @@ function formatCleanMessage(mes, cleanRaw) {
     return false;
 }
 
-// Remove everything from a character offset in an element's visible text to
-// the end while preserving the HTML/Markdown formatting before that point.
 function deleteTextFromOffset(root, startOffset) {
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    const nodes = [];
     let total = 0;
     let startNode = null;
     let startNodeOffset = 0;
@@ -189,10 +196,10 @@ function deleteTextFromOffset(root, startOffset) {
     while (walker.nextNode()) {
         const node = walker.currentNode;
         const len = node.nodeValue?.length ?? 0;
-        nodes.push(node);
         if (!startNode && startOffset <= total + len) {
             startNode = node;
             startNodeOffset = Math.max(0, startOffset - total);
+            break;
         }
         total += len;
     }
@@ -204,7 +211,6 @@ function deleteTextFromOffset(root, startOffset) {
     range.setEnd(root, root.childNodes.length);
     range.deleteContents();
 
-    // Remove empty trailing wrappers left behind after deleting the JSON.
     let child = root.lastElementChild;
     while (child && !child.textContent.trim() && !child.querySelector('img,video,audio,iframe')) {
         const prev = child.previousElementSibling;
@@ -220,6 +226,102 @@ function removeVisibleTrailingState(textEl, visible) {
     const suffixStart = full.lastIndexOf(visible.candidate);
     if (suffixStart < 0) return false;
     return deleteTextFromOffset(textEl, suffixStart);
+}
+
+function speakerColor(name) {
+    let hash = 2166136261;
+    const normalized = String(name ?? '').trim().toLowerCase();
+    for (let i = 0; i < normalized.length; i++) {
+        hash ^= normalized.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+    }
+    const hue = Math.abs(hash >>> 0) % 360;
+    return `hsl(${hue} 72% 67%)`;
+}
+
+function normalizeVisibleText(s) {
+    return String(s ?? '').replace(/\r/g, '').trim();
+}
+
+function findTextNodesWithOffsets(root) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const items = [];
+    let offset = 0;
+    while (walker.nextNode()) {
+        const node = walker.currentNode;
+        if (node.parentElement?.closest('.tt-scene-header')) continue;
+        const text = node.nodeValue ?? '';
+        items.push({ node, start: offset, end: offset + text.length });
+        offset += text.length;
+    }
+    return items;
+}
+
+function wrapTextSegment(node, start, end, speaker) {
+    if (start >= end) return;
+    let target = node;
+    if (start > 0) target = target.splitText(start);
+    const length = end - start;
+    if (length < target.nodeValue.length) target.splitText(length);
+
+    if (target.parentElement?.closest('.tt-speaker-dialogue')) return;
+
+    const span = document.createElement('span');
+    span.className = 'tt-speaker-dialogue';
+    span.dataset.ttSpeaker = speaker;
+    span.title = speaker;
+    span.style.color = speakerColor(speaker);
+    target.parentNode.insertBefore(span, target);
+    span.appendChild(target);
+}
+
+function colorVisibleRange(root, start, end, speaker) {
+    const nodes = findTextNodesWithOffsets(root);
+    for (let i = nodes.length - 1; i >= 0; i--) {
+        const item = nodes[i];
+        const segStart = Math.max(start, item.start);
+        const segEnd = Math.min(end, item.end);
+        if (segStart >= segEnd) continue;
+        wrapTextSegment(item.node, segStart - item.start, segEnd - item.start, speaker);
+    }
+}
+
+function applySpeakerColors(textEl, blocks) {
+    if (!blocks?.length) return;
+
+    textEl.querySelectorAll('.tt-speaker-dialogue').forEach(span => {
+        span.replaceWith(...span.childNodes);
+    });
+    textEl.normalize();
+
+    let searchFrom = 0;
+    for (const block of blocks) {
+        const dialogue = normalizeVisibleText(block.dialogue);
+        if (!dialogue) continue;
+
+        const visible = textEl.textContent || '';
+        let idx = visible.indexOf(dialogue, searchFrom);
+        if (idx < 0) idx = visible.indexOf(dialogue);
+        if (idx < 0) {
+            log('Could not locate rendered dialogue for speaker:', block.speaker, dialogue.slice(0, 80));
+            continue;
+        }
+
+        colorVisibleRange(textEl, idx, idx + dialogue.length, block.speaker);
+        searchFrom = idx + dialogue.length;
+    }
+}
+
+function stripVisibleSpeakerMarkers(textEl) {
+    const walker = document.createTreeWalker(textEl, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    for (const node of nodes) {
+        if (!node.nodeValue) continue;
+        node.nodeValue = node.nodeValue
+            .replace(/\[\[speaker:[^\]\r\n]+\]\]/gi, '')
+            .replace(/\[\[\/speaker\]\]/gi, '');
+    }
 }
 
 function isAssistantMessage(mes) {
@@ -242,17 +344,22 @@ function renderOneMessage(mes, inheritedState = null) {
     const found = rawState || visibleState?.state || null;
     const state = found || inheritedState || currentState;
 
-    if (rawState) {
-        // Prefer a clean re-render from raw text when the host formatter is exposed.
-        const cleanRaw = stripSceneState(raw);
-        const formatted = formatCleanMessage(mes, cleanRaw);
+    const withoutState = stripSceneState(raw);
+    const speakerData = parseSpeakerBlocks(withoutState);
+    const needsCleanRender = rawState || speakerData.blocks.length > 0;
+
+    if (needsCleanRender) {
+        const formatted = formatCleanMessage(mes, speakerData.clean);
         if (!formatted) {
-            // If formatter is unavailable, remove any JSON that leaked into rendered text.
-            removeVisibleTrailingState(textEl, visibleState);
+            if (visibleState) removeVisibleTrailingState(textEl, visibleState);
+            stripVisibleSpeakerMarkers(textEl);
         }
     } else if (visibleState) {
-        // Android/current TauriTavern may strip the XML wrapper before DOM rendering.
         removeVisibleTrailingState(textEl, visibleState);
+    }
+
+    if (speakerData.blocks.length > 0) {
+        applySpeakerColors(textEl, speakerData.blocks);
     }
 
     if (found) persistStateSoon(found);
