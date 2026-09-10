@@ -59,15 +59,23 @@ function parseSceneState(raw) {
 
 async function loadStoredState() {
     const handle = getHandle();
-    if (!handle?.store?.getJson) return null;
+    if (!handle?.store?.getJson || !handle?.store?.listKeys) return null;
+
     try {
+        const keys = await handle.store.listKeys({ namespace: EXT_NAME });
+        const keyList = Array.isArray(keys) ? keys : (Array.isArray(keys?.keys) ? keys.keys : []);
+
+        if (!keyList.includes(STATE_KEY)) {
+            return null;
+        }
+
         const value = await handle.store.getJson({
             namespace: EXT_NAME,
             key: STATE_KEY,
         });
         return normalizeState(value);
     } catch (err) {
-        log('No stored state yet:', err);
+        console.warn('[Scene State] Failed to read stored scene state:', err);
         return null;
     }
 }
