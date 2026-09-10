@@ -6,7 +6,7 @@
   "js": "index.js",
   "css": "style.css",
   "author": "Hooch88",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "homePage": "https://github.com/Hooch88/TauriTavern-SceneState",
   "auto_update": true
 }
