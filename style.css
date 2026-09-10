@@ -20,6 +20,7 @@
 }
 
 .tt-speaker-dialogue {
+    color: hsl(var(--tt-speaker-hue) 72% 67%);
     transition: color 120ms ease;
 }
 
