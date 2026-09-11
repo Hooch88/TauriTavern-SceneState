@@ -1,6 +1,6 @@
 # TauriTavern Scene State
 
-Version 0.3.0
+Version 0.3.1
 
 A lightweight TauriTavern extension with two narrator-facing display features:
 
@@ -19,7 +19,7 @@ Update/reload TauriTavern after a new release.
 
 Add the contents of `PROMPT_MODULE.txt` as a **System** prompt near the end of your preset.
 
-The narrator now emits renderer-safe plain-text markers:
+The narrator emits renderer-safe plain-text markers:
 
     [[scene_state]]
     {"location":"Sigma Tau House — Eugene, Oregon","date":"September 11, 2026","time":"11:42 PM"}
@@ -27,7 +27,7 @@ The narrator now emits renderer-safe plain-text markers:
 
 The extension removes that metadata from display and renders the scene header at the top of the narrator message.
 
-Version 0.3.0 still recognizes the older `<scene_state>...</scene_state>` form and bare trailing state JSON for backward compatibility.
+The extension also recognizes the older `<scene_state>...</scene_state>` form and bare trailing state JSON for backward compatibility.
 
 ## 08 — Speaker Colors
 
@@ -43,9 +43,11 @@ The extension removes the markers and colors only the enclosed dialogue. The sam
 
 ## TauriTavern integration
 
-Version 0.3.0 uses TauriTavern's `chatSurface` participant API when managed message ownership is enabled. This is the supported place to modify detached `.mes_text` content before TauriTavern commits it to the live chat surface. On older/static hosts it falls back to normal SillyTavern message-render events.
+Version 0.3.1 deliberately uses a resilient DOM observer instead of registering as a managed ChatSurface participant.
 
-This avoids relying on a long-running DOM MutationObserver that can be overwritten by TauriTavern's windowed/managed chat rendering.
+Why: TauriTavern loads ordinary third-party extensions after `APP_READY`, while the managed ChatSurface participant registry freezes at the first chat projection. A Git-installed third-party extension can therefore be too late to register reliably after a cold app start.
+
+Scene State watches the live chat surface and re-applies its lightweight presentation whenever TauriTavern mounts, virtualizes, or rewrites a message. This also handles messages restored after restarting the app.
 
 ## Design
 
@@ -56,11 +58,12 @@ This avoids relying on a long-running DOM MutationObserver that can be overwritt
 - deterministic speaker colors derived from speaker names
 - narration remains in the normal theme color
 - Scene State and Speaker Colors remain separate preset modules
+- restart/cold-start safe message decoration
 
 ## Files
 
 - `manifest.json` — extension metadata
-- `index.js` — ChatSurface integration and rendering
+- `index.js` — scene/speaker parsing and resilient message decoration
 - `style.css` — scene header and speaker styling
 - `PROMPT_MODULE.txt` — scene-state narrator instruction
 - `SPEAKER_MODULE.txt` — speaker-tagging narrator instruction
