@@ -1,95 +1,135 @@
-const EXT_ID = 'tt-scene-state/presentation';
 const SCENE_PATTERNS = [
     /\[\[scene_state\]\]\s*(\{[\s\S]*?\})\s*\[\[\/scene_state\]\]/i,
     /<scene_state>\s*(\{[\s\S]*?\})\s*<\/scene_state>/i,
 ];
 const SPEAKER_RE = /\[\[speaker:([^\]\r\n]+)\]\]([\s\S]*?)\[\[\/speaker\]\]/gi;
 
+let chatObserver = null;
+let observedChat = null;
+let discoveryObserver = null;
+let pending = new Set();
+let framePending = false;
+
+function log(...args) {
+    console.debug('[Scene State]', ...args);
+}
+
 function stateFromJson(text) {
     try {
-        const v = JSON.parse(text);
+        const value = JSON.parse(text);
         const state = {
-            location: String(v?.location ?? '').trim(),
-            date: String(v?.date ?? '').trim(),
-            time: String(v?.time ?? '').trim(),
+            location: String(value?.location ?? '').trim(),
+            date: String(value?.date ?? '').trim(),
+            time: String(value?.time ?? '').trim(),
         };
         return state.location || state.date || state.time ? state : null;
-    } catch { return null; }
+    } catch {
+        return null;
+    }
 }
 
 function findScene(text) {
-    const src = String(text ?? '');
-    for (const re of SCENE_PATTERNS) {
-        const m = re.exec(src);
-        const state = m && stateFromJson(m[1]);
-        if (state) return { state, start: m.index, end: m.index + m[0].length };
+    const source = String(text ?? '');
+
+    for (const pattern of SCENE_PATTERNS) {
+        pattern.lastIndex = 0;
+        const match = pattern.exec(source);
+        const state = match && stateFromJson(match[1]);
+        if (state) {
+            return {
+                state,
+                start: match.index,
+                end: match.index + match[0].length,
+            };
+        }
     }
 
-    // Compatibility with earlier replies where the HTML-like wrapper was stripped.
-    const trimmed = src.trimEnd();
+    // Compatibility with old messages where the wrapper disappeared but the
+    // state JSON remained visible at the end of the response.
+    const trimmed = source.trimEnd();
     const start = trimmed.lastIndexOf('{');
     if (start >= 0) {
         const candidate = trimmed.slice(start);
-        if (/"location"\s*:/.test(candidate) && /"date"\s*:/.test(candidate) && /"time"\s*:/.test(candidate)) {
+        if (/"location"\s*:/.test(candidate)
+            && /"date"\s*:/.test(candidate)
+            && /"time"\s*:/.test(candidate)) {
             const state = stateFromJson(candidate);
-            if (state) return { state, start, end: trimmed.length };
+            if (state) return { state, start, end: source.length };
         }
     }
+
     return null;
 }
 
 function pointAt(root, offset) {
-    const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    let total = 0, last = null;
-    while (w.nextNode()) {
-        const node = w.currentNode;
-        const len = node.nodeValue?.length ?? 0;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let total = 0;
+    let last = null;
+
+    while (walker.nextNode()) {
+        const node = walker.currentNode;
+        const length = node.nodeValue?.length ?? 0;
         last = node;
-        if (offset <= total + len) return { node, offset: Math.max(0, Math.min(len, offset - total)) };
-        total += len;
+        if (offset <= total + length) {
+            return {
+                node,
+                offset: Math.max(0, Math.min(length, offset - total)),
+            };
+        }
+        total += length;
     }
+
     return last ? { node: last, offset: last.nodeValue?.length ?? 0 } : null;
 }
 
 function deleteRange(root, start, end) {
     if (end <= start) return;
-    const a = pointAt(root, start), b = pointAt(root, end);
-    if (!a || !b) return;
+    const first = pointAt(root, start);
+    const last = pointAt(root, end);
+    if (!first || !last) return;
+
     const range = document.createRange();
-    range.setStart(a.node, a.offset);
-    range.setEnd(b.node, b.offset);
+    range.setStart(first.node, first.offset);
+    range.setEnd(last.node, last.offset);
     range.deleteContents();
 }
 
 function hueFor(name) {
-    let h = 2166136261;
+    let hash = 2166136261;
     for (const ch of String(name).trim().toLowerCase()) {
-        h ^= ch.charCodeAt(0);
-        h = Math.imul(h, 16777619);
+        hash ^= ch.charCodeAt(0);
+        hash = Math.imul(hash, 16777619);
     }
-    return (h >>> 0) % 360;
+    return (hash >>> 0) % 360;
 }
 
 function colorRange(root, start, end, speaker) {
-    const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     const nodes = [];
     let total = 0;
-    while (w.nextNode()) {
-        const node = w.currentNode;
-        const len = node.nodeValue?.length ?? 0;
-        nodes.push({ node, start: total, end: total + len });
-        total += len;
+
+    while (walker.nextNode()) {
+        const node = walker.currentNode;
+        const length = node.nodeValue?.length ?? 0;
+        nodes.push({ node, start: total, end: total + length });
+        total += length;
     }
 
-    for (let i = nodes.length - 1; i >= 0; i--) {
-        const item = nodes[i];
-        const a = Math.max(start, item.start), b = Math.min(end, item.end);
-        if (a >= b) continue;
+    for (let index = nodes.length - 1; index >= 0; index -= 1) {
+        const item = nodes[index];
+        const rangeStart = Math.max(start, item.start);
+        const rangeEnd = Math.min(end, item.end);
+        if (rangeStart >= rangeEnd) continue;
+
         let target = item.node;
-        const localA = a - item.start, localB = b - item.start;
-        if (localA > 0) target = target.splitText(localA);
-        const len = localB - localA;
-        if (len < target.nodeValue.length) target.splitText(len);
+        const localStart = rangeStart - item.start;
+        const localEnd = rangeEnd - item.start;
+        if (localStart > 0) target = target.splitText(localStart);
+
+        const selectedLength = localEnd - localStart;
+        if (selectedLength < target.nodeValue.length) target.splitText(selectedLength);
+        if (target.parentElement?.closest('.tt-speaker-dialogue')) continue;
+
         const span = document.createElement('span');
         span.className = 'tt-speaker-dialogue';
         span.dataset.speaker = speaker;
@@ -102,79 +142,186 @@ function colorRange(root, start, end, speaker) {
 
 function decorateSpeakers(content) {
     const text = content.textContent || '';
+    SPEAKER_RE.lastIndex = 0;
     const matches = [...text.matchAll(SPEAKER_RE)];
-    for (let i = matches.length - 1; i >= 0; i--) {
-        const m = matches[i], full = m[0], speaker = String(m[1]).trim(), dialogue = m[2] ?? '';
+
+    for (let index = matches.length - 1; index >= 0; index -= 1) {
+        const match = matches[index];
+        const full = match[0];
+        const speaker = String(match[1] ?? '').trim();
+        const dialogue = match[2] ?? '';
         const dialogueOffset = full.indexOf(dialogue);
         const closeOffset = full.lastIndexOf('[[/speaker]]');
         if (!speaker || dialogueOffset < 0 || closeOffset < 0) continue;
-        const start = m.index;
-        const dStart = start + dialogueOffset, dEnd = dStart + dialogue.length;
-        const closeStart = start + closeOffset, end = start + full.length;
-        colorRange(content, dStart, dEnd, speaker);
+
+        const start = match.index;
+        const dialogueStart = start + dialogueOffset;
+        const dialogueEnd = dialogueStart + dialogue.length;
+        const closeStart = start + closeOffset;
+        const end = start + full.length;
+
+        colorRange(content, dialogueStart, dialogueEnd, speaker);
         deleteRange(content, closeStart, end);
-        deleteRange(content, start, dStart);
+        deleteRange(content, start, dialogueStart);
     }
 }
 
 function makeHeader(state) {
     const box = document.createElement('div');
     box.className = 'tt-scene-header';
-    const loc = document.createElement('div');
-    loc.className = 'tt-scene-header-location';
-    loc.textContent = `📍 ${state.location || 'Location unknown'}`;
+
+    const location = document.createElement('div');
+    location.className = 'tt-scene-header-location';
+    location.textContent = `📍 ${state.location || 'Location unknown'}`;
+
     const when = document.createElement('div');
     when.className = 'tt-scene-header-time';
     when.textContent = `🕒 ${[state.date, state.time].filter(Boolean).join(' — ') || 'Time unknown'}`;
-    box.append(loc, when);
+
+    box.append(location, when);
     return box;
 }
 
 function decorateContent(content) {
     if (!(content instanceof HTMLElement)) return;
-    const text = content.textContent || '';
-    if (!text.includes('[[speaker:') && !text.includes('[[scene_state]]') && !text.includes('<scene_state>') && !findScene(text)) return;
 
-    const scene = findScene(text);
-    if (scene) deleteRange(content, scene.start, scene.end);
+    const initialText = content.textContent || '';
+    const scene = findScene(initialText);
+    const hasSpeakerData = initialText.includes('[[speaker:');
+    if (!scene && !hasSpeakerData) return;
+
+    // ChatSurface may rewrite an already-decorated message. If that happens,
+    // discard our old header before recalculating offsets from the raw markers.
+    content.querySelectorAll('.tt-scene-header').forEach(node => node.remove());
+
+    const currentScene = findScene(content.textContent || '');
+    if (currentScene) deleteRange(content, currentScene.start, currentScene.end);
+
     decorateSpeakers(content);
-    if (scene?.state) content.prepend(makeHeader(scene.state));
+
+    if (currentScene?.state) content.prepend(makeHeader(currentScene.state));
 }
 
-function startLegacy() {
-    const processAll = () => document.querySelectorAll('#chat > .mes .mes_text').forEach(decorateContent);
-    const ctx = window.SillyTavern?.getContext?.();
-    const onMessage = (id) => {
-        const el = document.querySelector(`#chat > .mes[mesid="${id}"] .mes_text`);
-        if (el) decorateContent(el);
-    };
-    if (ctx?.eventSource && ctx?.eventTypes) {
-        for (const key of ['CHARACTER_MESSAGE_RENDERED', 'MESSAGE_UPDATED', 'MESSAGE_SWIPED']) {
-            const event = ctx.eventTypes[key];
-            if (event) ctx.eventSource.on(event, onMessage);
+function queueContent(content) {
+    if (!(content instanceof HTMLElement)) return;
+    pending.add(content);
+    if (framePending) return;
+
+    framePending = true;
+    requestAnimationFrame(() => {
+        framePending = false;
+        const work = [...pending];
+        pending.clear();
+        for (const item of work) {
+            if (item.isConnected) decorateContent(item);
         }
+    });
+}
+
+function collectFromNode(node) {
+    if (node instanceof Text) {
+        const content = node.parentElement?.closest('.mes_text');
+        if (content) queueContent(content);
+        return;
     }
+
+    if (!(node instanceof HTMLElement)) return;
+    if (node.matches('.mes_text')) queueContent(node);
+
+    const parentContent = node.closest('.mes_text');
+    if (parentContent) queueContent(parentContent);
+
+    node.querySelectorAll?.('.mes_text').forEach(queueContent);
+}
+
+function processAll() {
+    document.querySelectorAll('#chat > .mes .mes_text').forEach(queueContent);
+}
+
+function observeChat(chat) {
+    if (!(chat instanceof HTMLElement) || observedChat === chat) return;
+
+    chatObserver?.disconnect();
+    observedChat = chat;
+    chatObserver = new MutationObserver(mutations => {
+        for (const mutation of mutations) {
+            collectFromNode(mutation.target);
+            mutation.addedNodes.forEach(collectFromNode);
+        }
+    });
+    chatObserver.observe(chat, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+    });
+
     processAll();
+    log('Chat DOM observer active');
 }
 
-async function init() {
-    try { await (window.__TAURITAVERN__?.ready ?? window.__TAURITAVERN_MAIN_READY__); } catch {}
-    const api = window.__TAURITAVERN__?.api?.chatSurface;
-    if (api?.isManagedOwnershipRequired?.() === true && api?.registerParticipant) {
-        try {
-            api.registerParticipant({
-                id: EXT_ID,
-                protocolVersion: api.protocolVersion,
-                prepareContent({ content }) { decorateContent(content); },
-            });
-            console.debug('[Scene State] ChatSurface participant registered');
-            return;
-        } catch (error) {
-            console.error('[Scene State] ChatSurface registration failed:', error);
-        }
+function ensureChatObserver() {
+    const chat = document.querySelector('#chat');
+    if (!(chat instanceof HTMLElement)) return false;
+
+    observeChat(chat);
+    discoveryObserver?.disconnect();
+    discoveryObserver = null;
+    return true;
+}
+
+function startDiscoveryObserver() {
+    if (ensureChatObserver()) return;
+
+    const root = document.documentElement || document.body;
+    if (!root) {
+        setTimeout(startDiscoveryObserver, 100);
+        return;
     }
-    startLegacy();
-    console.debug('[Scene State] Legacy renderer active');
+
+    discoveryObserver?.disconnect();
+    discoveryObserver = new MutationObserver(() => ensureChatObserver());
+    discoveryObserver.observe(root, { childList: true, subtree: true });
+}
+
+function bindHostEvents() {
+    try {
+        const context = window.SillyTavern?.getContext?.();
+        const eventSource = context?.eventSource;
+        const eventTypes = context?.eventTypes;
+        if (!eventSource || !eventTypes) return;
+
+        const processMessage = id => {
+            requestAnimationFrame(() => {
+                const content = document.querySelector(`#chat > .mes[mesid="${id}"] .mes_text`);
+                if (content) queueContent(content);
+                else processAll();
+            });
+        };
+
+        for (const key of ['CHARACTER_MESSAGE_RENDERED', 'MESSAGE_UPDATED', 'MESSAGE_SWIPED']) {
+            const event = eventTypes[key];
+            if (event) eventSource.on(event, processMessage);
+        }
+
+        for (const key of ['CHAT_CHANGED', 'CHAT_LOADED']) {
+            const event = eventTypes[key];
+            if (event) eventSource.on(event, processAll);
+        }
+    } catch (error) {
+        console.warn('[Scene State] Host event binding failed; DOM observer remains active.', error);
+    }
+}
+
+function init() {
+    // TauriTavern defers ordinary third-party extension activation until after
+    // APP_READY, while ChatSurface participant registration freezes at the
+    // first projection. A late participant therefore cannot be cold-start
+    // reliable. This extension intentionally uses a resilient DOM decorator
+    // that re-applies after TauriTavern mounts or rewrites message content.
+    startDiscoveryObserver();
+    bindHostEvents();
+    processAll();
+    log('v0.3.1 initialized');
 }
 
 init();
